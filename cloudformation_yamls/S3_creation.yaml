@@ -1,0 +1,52 @@
+#  first template to execute
+# update like aws s3 cp ~/my_folder_with_the_sql_file/* s3://starlog-sql-bucket/sql-scripts --recursive
+# updaye the py with aws s3 cp ~/my_folder_with_the_py_file/* s3://starlog-py-bucket/sql-scripts --recursive
+
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  # S3 Bucket for SQL files
+  SqlBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: 'entlog-sql-bucket'  
+      AccessControl: 'Private'
+
+  # IAM Role for EC2 to access S3
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action: 'sts:AssumeRole'
+            Principal:
+              Service: 'ec2.amazonaws.com'
+      Policies:
+        - PolicyName: 'EC2S3AccessPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                Resource:
+                  - 'arn:aws:s3:::entlog-sql-bucket/*'  # access everything
+          
+  # IAM for EC2 to use the IAM Role
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - Ref: 'EC2Role'
+      
+Outputs:
+  S3BucketName:
+    Description: 'S3 Bucket for storing SQL files'
+    Value: !Ref SqlBucket
+  EC2RoleArn:
+    Description: 'EC2 Role ARN'
+    Value: !GetAtt EC2Role.Arn
+  EC2InstanceProfileArn:
+    Description: 'EC2 Instance Profile ARN'
+    Value: !GetAtt EC2InstanceProfile.Arn

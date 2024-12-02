@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Infrastructure for EntLog project with RDS and EC2 in the same VPC.
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: EntLogVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: EntLogIGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: EntLogPublicSubnet
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: EntLogRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow access to EC2 and RDS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0 # SSH access
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 10.0.0.0/16 # PostgreSQL access
+        - IpProtocol: tcp
+          FromPort: 1521
+          ToPort: 1521
+          CidrIp: 10.0.0.0/16 # Oracle access
+
+  EC2Instance:
+  Type: AWS::EC2::Instance
+  Properties:
+    InstanceType: t2.micro
+    KeyName: KEY
+    SubnetId: !Ref PublicSubnet
+    SecurityGroupIds:
+      - !Ref SecurityGroup
+    ImageId: ami-0c02fb55956c7d316  
+    Tags:
+      - Key: Name
+        Value: EntLogEC2
+    IamInstanceProfile: !Ref EC2InstanceProfile  # Attach the IAM Role 
+    UserData:
+      Fn::Base64: !Sub |
+        #!/bin/bash
+        # Update the system 
+        yum update -y
+        yum install -y git oracle-instantclient19.8 sqlplus postgresql
+
+        # Set environment variables for Oracle and PostgreSQL connections
+        ORACLE_SID=entLog_oracle
+        ORACLE_USER=admin
+        ORACLE_PASS=Admin1234
+        POSTGRES_USER=admin
+        POSTGRES_PASS=Admin1234
+
+        # Install AWS CLI , ora2pg
+        yum install -y aws-cli 
+        yum install -y epel-release
+        yum install -y ora2pg
+
+
+        # Download scripts from the S3 bucket 
+        # this could be also just git repo a i need to upload almost everything except the yamls.
+        aws s3 cp s3://starlog-sql-bucket/sql-scripts /home/ec2-user/entLog-schema/ --recursive
+        aws s3 cp s3://starlog-sql-bucket/py-scripts /home/ec2-user/entLog-mygration-scripts/ --recursive
+
+        # set up RDSs with schema and insert all rows.
+        echo "Executing Oracle schema..."
+        sqlplus ${ORACLE_USER}/${ORACLE_PASS}@<OracleEndpoint>:1521/${ORACLE_SID} @/home/ec2-user/entLog-schema/oracle/ent_log_schema_oracle.sql
+       
+        echo "Inserting data into Oracle..."
+        sqlplus ${ORACLE_USER}/${ORACLE_PASS}@<OracleEndpoint>:1521/${ORACLE_SID} @/home/ec2-user/entLog-schema/oracle/insert_statements_oracle.sql
+       
+        echo "Executing PostgreSQL schema..."
+        PGPASSWORD=${POSTGRES_PASS} psql -h <PostgreSQLEndpoint> -U ${POSTGRES_USER} -d EntLog_postgres -f /home/ec2-user/entLog-schema/postgres/ent_log_schema_postgre.sql
+                
+        echo "Inserting data into PostgreSQL..."
+        PGPASSWORD=${POSTGRES_PASS} psql -h <PostgreSQLEndpoint> -U ${POSTGRES_USER} -d EntLog_postgres -f /home/ec2-user/entLog-schema/postgres/insert_statements_postgre.sql
+        
+
+
+  OracleRDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: EntLog-oracle
+      DBInstanceClass: db.t3.micro
+      Engine: oracle-se2
+      LicenseModel: bring-your-own-license
+      MasterUsername: admin
+      MasterUserPassword: Admin1234
+      AllocatedStorage: 20
+      VPCSecurityGroups:
+        - !Ref SecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+  PostgreSQLRDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: EntLog-postgres
+      DBInstanceClass: db.t3.micro
+      Engine: postgres
+      MasterUsername: admin
+      MasterUserPassword: Admin1234
+      AllocatedStorage: 20
+      VPCSecurityGroups:
+        - !Ref SecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - !Ref PublicSubnet
+
+Outputs:
+  EC2PublicIP:
+    Description: Public IP of EC2 instance
+    Value: !GetAtt EC2Instance.PublicIp
+  OracleEndpoint:
+    Description: Oracle RDS endpoint
+    Value: !GetAtt OracleRDS.Endpoint.Address
+  PostgreSQLEndpoint:
+    Description: PostgreSQL RDS endpoint
+    Value: !GetAtt PostgreSQLRDS.Endpoint.Address
